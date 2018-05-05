@@ -41,6 +41,8 @@ namespace GZipTest
             Console.WriteLine(message);
             Console.WriteLine("Press any key to exit...");
             Console.ReadKey();
+            
+
         }
 
         #region Private constants
