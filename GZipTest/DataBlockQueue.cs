@@ -15,7 +15,12 @@ namespace GZipTest
             IsAddingCompleted = false;
         }
 
-        public void Enqueue(DataBlock block, bool lastItem)
+        public void CompleteAdding()
+        {
+            IsAddingCompleted = true;
+        }
+
+        public void Enqueue(DataBlock block)
         {
             if (IsAddingCompleted)
                 throw new InvalidOperationException("Trying add item when adding is already completed.");
@@ -23,8 +28,6 @@ namespace GZipTest
             lock(_queue)
             {
                 _queue.Enqueue(block);
-                if (lastItem)
-                    IsAddingCompleted = true;
                 Monitor.Pulse(_queue);
             }
         }
@@ -34,11 +37,10 @@ namespace GZipTest
             DataBlock retVal;
             lock(_queue)
             {
-                if (_queue.Count == 0 && IsAddingCompleted)
-                    return null;
-
                 while (_queue.Count == 0)
                 {
+                    if (IsAddingCompleted)
+                        return null;
                     Monitor.Wait(_queue);
                 }
                 retVal = _queue.Dequeue();

@@ -20,7 +20,7 @@ namespace GZipTest
         {
             // clean up resources from previous usage
             CleanUp();
-            
+
             // for each thread:
             //   --- enter crit section ---
             //   1 get position to read
@@ -29,7 +29,8 @@ namespace GZipTest
             //   3 read X bytes from current position
             //   4 compress calculate new size
             //   5 push to queue
-            CreateProcessingThreads(() => CompressBlock(source));
+            CreateProcessingThreads(() => ReadAndCompressBlock(source));
+           // ReadAndCompressBlock(source);
 
             // in main thread until queue is in work:
             //   1 pop from queue
@@ -56,58 +57,57 @@ namespace GZipTest
             //   3.3 read compressed data
             //   3.4 decompress data
             //   3.5 push to queue
-
+            CreateProcessingThreads(() => ReadAndDecompressBlock(source));
+            //ReadAndDecompressBlock(source);
             // 4. in main thread until queue is in work:
             //   4.1 pop from queue
             //   4.2 write to file decompressed data to the correct position
+            WriteDecompressedBlocks(destination);
         }
 
         #region Private methods
 
-        private void CompressBlock(string sourceFile)
+        private void ReadAndCompressBlock(string sourceFile)
         {
             using (var fs = new FileStream(sourceFile, FileMode.Open, FileAccess.Read))
             {
-                int filePositionToRead;
-                ulong index;
-                int realLength;
                 while (true)
                 {
+                    int filePositionToRead;
+                    ulong index;
                     lock (_filePositionLock)
                     {
                         filePositionToRead = _filePosition;
+                        if (filePositionToRead >= fs.Length)
+                        {
+                            lock (_aliveThreadCountLock)
+                            {
+                                if (--_aliveThreadCount <= 0) // last thread informs queue that we will not add new elements
+                                {
+                                    _dataBlocksQueue.CompleteAdding();
+                                }
+                            }
+                            return; // exit when we reached end of file
+                        }
                         _filePosition += BlockSizeOrigin;
                         index = _currentBlockIndex;
                         _currentBlockIndex++;
                     }
                     byte[] data = new byte[BlockSizeOrigin];
                     fs.Seek(filePositionToRead, SeekOrigin.Begin);
-                    realLength = fs.Read(data, 0, BlockSizeOrigin);
+                    var realLength = fs.Read(data, 0, BlockSizeOrigin);
 
-                    var block = new DataBlock(index, realLength);
+                    var block = new DataBlock(index);
                     using (var compressed = new MemoryStream())
                     {
-                        using (var compressor = new GZipStream(compressed, CompressionMode.Compress))
+                        using (var compressor = new GZipStream(compressed, CompressionMode.Compress, true))
                         {
                             compressor.Write(data, 0, realLength);
                         }
                         block.Data = compressed.ToArray();
-                        block.Size = block.Data.Length;
                     }
 
-                    if (filePositionToRead + BlockSizeOrigin >= fs.Length)
-                    {
-                        lock (_aliveThreadCountLock)
-                        {
-                            if (--_aliveThreadCount <= 0) // last thread informs queue that we will not add new elements
-                            {
-                                _dataBlocksQueue.Enqueue(block, true);
-                                return;
-                            }
-                        }
-                        break; // exit when we reached end of file
-                    }
-                    _dataBlocksQueue.Enqueue(block, false);
+                    _dataBlocksQueue.Enqueue(block);
                 }
             }
         }
@@ -136,6 +136,30 @@ namespace GZipTest
             }
         }
 
+        private void WriteDecompressedBlocks(string destinationFile)
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(destinationFile, FileMode.CreateNew, FileAccess.Write))
+                {
+                    while (true)
+                    {
+                        var block = _dataBlocksQueue.Dequeue();
+                        if (block == null) // returns null when adding completed and queue is empty
+                            break;
+
+                        fs.Seek((long)(block.Index * (ulong)BlockSizeOrigin), SeekOrigin.Begin);
+                        fs.Write(block.Data, 0, block.Size);
+                    }
+                }
+
+            }
+            catch (IOException ex)
+            {
+                throw new IOException("Destination file already exists. Please remove it and try once more.", ex);
+            }
+        }
+
         private byte[] CompressedBlockToByteArray(DataBlock block)
         {
             byte[] ret = new byte[IndexPrefixLength + SizePrefixLength + block.Data.Length];
@@ -155,16 +179,105 @@ namespace GZipTest
             Array.Copy(block.Data, 0, ret, destPosition, block.Data.Length);
             return ret;
         }
-    
+
+        private void ReadAndDecompressBlock(string sourceFile)
+        {
+            using (var fs = new FileStream(sourceFile, FileMode.Open, FileAccess.Read))
+            {
+                while (true)
+                {
+                    int filePositionToRead;
+                    ulong index;
+                    int blockSize;
+                    lock (_filePositionLock)
+                    {
+                        // read index of block, its size and set _filePosition to next block
+                        filePositionToRead = _filePosition;
+                        if (filePositionToRead >= fs.Length)
+                        {
+                            lock (_aliveThreadCountLock)
+                            {
+                                if (--_aliveThreadCount <= 0) // last thread informs queue that we will not add new elements
+                                {
+                                    _dataBlocksQueue.CompleteAdding();
+                                }
+                            }
+                            return; // exit when we reached end of file}
+                        }
+
+                        byte[] indexArray = new byte[IndexPrefixLength];
+                        byte[] sizeArray = new byte[SizePrefixLength];
+                        fs.Seek(filePositionToRead, SeekOrigin.Begin);
+                        var realIndexLength = fs.Read(indexArray, 0, IndexPrefixLength);
+                        var realSizeLength = fs.Read(sizeArray, 0, SizePrefixLength);
+                        if (realIndexLength != IndexPrefixLength || realSizeLength != SizePrefixLength)
+                            throw new Exception("Unsupported format of decompressing file");
+                        if (BitConverter.IsLittleEndian)
+                        {
+                            Array.Reverse(indexArray);
+                            Array.Reverse(sizeArray);
+                        }
+                        index = BitConverter.ToUInt64(indexArray, 0);
+                        blockSize = BitConverter.ToInt32(sizeArray, 0);
+
+                        _filePosition += IndexPrefixLength + SizePrefixLength + blockSize;
+                    }
+                    byte[] data = new byte[blockSize];
+                    if (fs.Read(data, 0, blockSize) != blockSize)
+                        throw new Exception("Unsupported format of decompressing file");
+                    var block = new DataBlock(index);
+                    byte[] decompressedData = new byte[blockSize];
+
+                    using (var src = new MemoryStream(data))
+                    using (var decompressor = new GZipStream(src, CompressionMode.Decompress))
+                    using (MemoryStream decompressed = new MemoryStream())
+                    {
+                        CopyStream(decompressor, decompressed);
+                        block.Data = decompressed.ToArray();
+                    }
+                    if (block.Size != BlockSizeOrigin)
+                        _wrongSizeBlocks++;
+                    if (_wrongSizeBlocks > 1)
+                        throw new Exception("Unsupported format of decompressing file");
+                    _dataBlocksQueue.Enqueue(block);
+                }
+            }
+        }
+
+        private byte[] CompressData(byte[] data, int length, CompressionMode mode)
+        {
+            using (var compressed = new MemoryStream())
+            {
+                using (var compressor = new GZipStream(compressed, mode))
+                {
+                    compressor.Write(data, 0, length);
+                }
+                return compressed.ToArray();
+            }
+        }
+
+        private static void CopyStream(Stream input, Stream output)
+        {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = input.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                output.Write(buffer, 0, bytesRead);
+            }
+        }
+
         private void CleanUp()
         {
+            _wrongSizeBlocks = 0;
             _filePosition = 0;
             _currentBlockIndex = 0;
             foreach (var t in _processingThreads)
             {
-                t.Abort();
+                if (t.IsAlive)
+                    t.Abort();
             }
             _processingThreads.Clear();
+            _aliveThreadCount = 0;
         }
 
         private void CreateProcessingThreads(Action actionToRun)
@@ -196,6 +309,7 @@ namespace GZipTest
         private int _aliveThreadCount;
         private static object _aliveThreadCountLock = new object();
 
+        private int _wrongSizeBlocks; // only one block during decompressing can be not equal to BlockSizeOrigin - the last one in origin file
 
         #endregion
 

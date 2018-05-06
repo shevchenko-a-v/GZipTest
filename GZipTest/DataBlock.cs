@@ -7,13 +7,12 @@ namespace GZipTest
 {
     internal class DataBlock
     {
-        public DataBlock(ulong index, int size)
+        public DataBlock(ulong index)
         {
-            Size = size;
             Index = index;
         }
 
-        public int Size { get; set; }
+        public int Size { get { return Data?.Length ?? 0; } }
         public ulong Index { get; private set; }
         public byte[] Data { get; set; }
     }
