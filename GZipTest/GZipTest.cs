@@ -70,7 +70,7 @@ namespace GZipTest
                 while (true)
                 {
                     int filePositionToRead;
-                    ulong index;
+                    long index;
                     // --- enter critical section ---
                     lock (_filePositionLock)
                     {
@@ -92,8 +92,7 @@ namespace GZipTest
                         }
                         // set position for next thread 
                         _filePosition += BlockSizeOrigin;
-                        index = _currentBlockIndex;
-                        _currentBlockIndex++;
+                        index = _currentBlockIndex++;
                     // --- leave critical section ---
                     }
                     // read block from current position
@@ -145,7 +144,7 @@ namespace GZipTest
                         var bytesToWrite = mode == CompressionMode.Compress ? CompressedBlockToByteArray(block) : block.Data;
 
                         if (mode == CompressionMode.Decompress)
-                            fs.Seek((long)(block.Index * (ulong)BlockSizeOrigin), SeekOrigin.Begin);
+                            fs.Seek((block.Index * BlockSizeOrigin), SeekOrigin.Begin);
                         fs.Write(bytesToWrite, 0, bytesToWrite.Length);
                         ReportProgress();
                     }
@@ -189,7 +188,7 @@ namespace GZipTest
                 while (true)
                 {
                     int filePositionToRead;
-                    ulong index;
+                    long index;
                     int blockSize;
                     //   --- enter crit section ---
                     lock (_filePositionLock)
@@ -225,7 +224,7 @@ namespace GZipTest
                             Array.Reverse(indexArray);
                             Array.Reverse(sizeArray);
                         }
-                        index = BitConverter.ToUInt64(indexArray, 0);
+                        index = BitConverter.ToInt64(indexArray, 0);
                         blockSize = BitConverter.ToInt32(sizeArray, 0);
                         
                         // set file position for next thread
@@ -355,7 +354,7 @@ namespace GZipTest
 
         private int ThreadNumber { get; } = Math.Max(Environment.ProcessorCount - 1, MinThreadNumber); // try use as many threads as logical processors exsit minus one for main thread
 
-        private ulong _currentBlockIndex;
+        private long _currentBlockIndex;
         private int _filePosition;
         private static object _filePositionLock = new object();
 

@@ -41,9 +41,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="DataBlock.cs" />
-    <Compile Include="DataBlockQueue.cs" />
+    <Compile Include="ThreadSafeQueue.cs" />
     <Compile Include="GZipTest.cs" />
-    <Compile Include="Helpers\StringExtensions.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
