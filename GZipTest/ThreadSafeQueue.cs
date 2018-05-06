@@ -40,7 +40,7 @@ namespace GZipTest
                 {
                     if (IsAddingCompleted)
                         throw new InvalidOperationException("Attempt to extract item when there are no items anymore and new items are not expected.");
-                    Monitor.Wait(_queue);
+                    Monitor.Wait(_queue, 250); // AddingCompleted can change value during this wait, so set the timeout interval to check it sometimes
                 }
                 var retVal = _queue.Dequeue();
                 _maxLengthSemaphore.Release();

@@ -12,10 +12,11 @@ namespace GZipTest
 
     public class GZipTest
     {
-        public GZipTest(ReportProgressDelegate report = null)
+        public GZipTest(Action<Exception> threadExceptionHandler, ReportProgressDelegate report = null)
         {
             if (report != null)
                 _report = report;
+            _threadExceptionHandler = threadExceptionHandler;
             _dataBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
             _processingThreads = new List<Thread>();
         }
@@ -81,13 +82,7 @@ namespace GZipTest
                         filePositionToRead = _filePosition;
                         if (filePositionToRead >= fs.Length) // EOF -> exit
                         {
-                            lock (_aliveThreadCountLock)
-                            {
-                                if (--_aliveThreadCount <= 0) // last thread informs queue that we will not add new elements
-                                {
-                                    _dataBlocksQueue.CompleteAdding();
-                                }
-                            }
+                            HandleThreadExit();
                             return; // exit when we reached end of file
                         }
                         // set position for next thread 
@@ -125,35 +120,27 @@ namespace GZipTest
         /// <param name="mode">Compress or Decompress</param>
         private void WriteBlocks(string destinationFile, CompressionMode mode)
         {
-            try
+            using (FileStream fs = new FileStream(destinationFile, FileMode.CreateNew, FileAccess.Write))
             {
-                using (FileStream fs = new FileStream(destinationFile, FileMode.CreateNew, FileAccess.Write))
+                while (true)
                 {
-                    while (true)
+                    DataBlock block = null;
+                    try
                     {
-                        DataBlock block = null;
-                        try
-                        {
-                            block = _dataBlocksQueue.Dequeue();
-                        }
-                        catch(InvalidOperationException)
-                        {
-                            // queue is empty and no items will be added -> exit
-                            return;
-                        }
-                        var bytesToWrite = mode == CompressionMode.Compress ? CompressedBlockToByteArray(block) : block.Data;
-
-                        if (mode == CompressionMode.Decompress)
-                            fs.Seek((block.Index * BlockSizeOrigin), SeekOrigin.Begin);
-                        fs.Write(bytesToWrite, 0, bytesToWrite.Length);
-                        ReportProgress();
+                        block = _dataBlocksQueue.Dequeue();
                     }
-                }
+                    catch(InvalidOperationException)
+                    {
+                        // queue is empty and no items will be added -> exit
+                        return;
+                    }
+                    var bytesToWrite = mode == CompressionMode.Compress ? CompressedBlockToByteArray(block) : block.Data;
 
-            }
-            catch(IOException ex)
-            {
-                throw new IOException("Destination file already exists.", ex);
+                    if (mode == CompressionMode.Decompress)
+                        fs.Seek((block.Index * BlockSizeOrigin), SeekOrigin.Begin);
+                    fs.Write(bytesToWrite, 0, bytesToWrite.Length);
+                    ReportProgress();
+                }
             }
         }
         
@@ -200,13 +187,7 @@ namespace GZipTest
                         filePositionToRead = _filePosition;
                         if (filePositionToRead >= fs.Length) // EOF -> exit
                         {
-                            lock (_aliveThreadCountLock)
-                            {
-                                if (--_aliveThreadCount <= 0) // last thread informs queue that we will not add new elements
-                                {
-                                    _dataBlocksQueue.CompleteAdding();
-                                }
-                            }
+                            HandleThreadExit();
                             return; // exit when we reached end of file}
                         }
 
@@ -333,9 +314,34 @@ namespace GZipTest
             _processingThreads.Clear();
             for (int i = 0; i < ThreadNumber; ++i)
             {
-                var t = new Thread(() => actionToRun());
+                var t = new Thread(() =>
+                {
+                    try
+                    {
+                        actionToRun();
+                    }
+                    catch (Exception ex)
+                    {
+                        HandleThreadExit();
+                        if (_threadExceptionHandler != null)
+                            _threadExceptionHandler(ex);
+                        else
+                            throw;
+                    }
+                });
                 _processingThreads.Add(t);
                 t.Start();
+            }
+        }
+
+        private void HandleThreadExit()
+        {
+            lock (_aliveThreadCountLock)
+            {
+                if (--_aliveThreadCount <= 0) // last thread informs queue that we will not add new elements
+                {
+                    _dataBlocksQueue.CompleteAdding();
+                }
             }
         }
 
@@ -350,6 +356,7 @@ namespace GZipTest
         ReportProgressDelegate _report;
         private int _totalTasks;
         private int _currentTask;
+        Action<Exception> _threadExceptionHandler;
         #endregion Progress report
 
         private int ThreadNumber { get; } = Math.Max(Environment.ProcessorCount - 1, MinThreadNumber); // try use as many threads as logical processors exsit minus one for main thread
