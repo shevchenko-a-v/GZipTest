@@ -23,12 +23,12 @@ namespace GZipTest
             {
                 GZipTest gZip = new GZipTest(ReportProgress);
 
-                if (mode.EqualsNoCase(CompressMode))
+                if (mode.Equals(CompressMode, StringComparison.OrdinalIgnoreCase))
                 {
                     Console.WriteLine("Compression in progress...");
                     gZip.Compress(sourceFile, destinationFile);
                 }
-                else if (mode.EqualsNoCase(DecompressMode))
+                else if (mode.Equals(DecompressMode, StringComparison.OrdinalIgnoreCase))
                 {
                     Console.WriteLine("Decompression in progress...");
                     gZip.Decompress(sourceFile, destinationFile);

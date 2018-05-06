@@ -6,9 +6,9 @@ using System.Threading;
 
 namespace GZipTest
 {
-    internal class DataBlockQueue
+    internal class ThreadSafeQueue<T>
     {
-        public DataBlockQueue(int maxLength)
+        public ThreadSafeQueue(int maxLength)
         {
             _maxLength = maxLength;
             _maxLengthSemaphore = new Semaphore(_maxLength, _maxLength);
@@ -20,10 +20,10 @@ namespace GZipTest
             IsAddingCompleted = true;
         }
 
-        public void Enqueue(DataBlock block)
+        public void Enqueue(T block)
         {
             if (IsAddingCompleted)
-                throw new InvalidOperationException("Trying add item when adding is already completed.");
+                throw new InvalidOperationException("Attempt to add item when adding is already completed.");
             _maxLengthSemaphore.WaitOne();
             lock(_queue)
             {
@@ -32,26 +32,25 @@ namespace GZipTest
             }
         }
 
-        public DataBlock Dequeue()
+        public T Dequeue()
         {
-            DataBlock retVal;
             lock(_queue)
             {
                 while (_queue.Count == 0)
                 {
                     if (IsAddingCompleted)
-                        return null;
+                        throw new InvalidOperationException("Attempt to extract item when there are no items anymore and new items are not expected.");
                     Monitor.Wait(_queue);
                 }
-                retVal = _queue.Dequeue();
+                var retVal = _queue.Dequeue();
                 _maxLengthSemaphore.Release();
+                return retVal;
             }
-            return retVal;
         }
 
         private bool IsAddingCompleted { get; set; }
 
-        private Queue<DataBlock> _queue = new Queue<DataBlock>();
+        private Queue<T> _queue = new Queue<T>();
 
         private int _maxLength;
         private Semaphore _maxLengthSemaphore;
