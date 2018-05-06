@@ -80,11 +80,9 @@ namespace GZipTest
                             _totalTasks = (int)Math.Ceiling((double)fs.Length / BlockSizeOrigin);
                         // get position to read
                         filePositionToRead = _filePosition;
-                        if (filePositionToRead >= fs.Length) // EOF -> exit
-                        {
-                            HandleThreadExit();
+                        if (filePositionToRead >= fs.Length)
                             return; // exit when we reached end of file
-                        }
+
                         // set position for next thread 
                         _filePosition += BlockSizeOrigin;
                         index = _currentBlockIndex++;
@@ -185,11 +183,8 @@ namespace GZipTest
                             _totalTasks = GetBlocksCount(fs);
 
                         filePositionToRead = _filePosition;
-                        if (filePositionToRead >= fs.Length) // EOF -> exit
-                        {
-                            HandleThreadExit();
+                        if (filePositionToRead >= fs.Length)
                             return; // exit when we reached end of file}
-                        }
 
                         // read index of block, its size and set _filePosition to next block
                         byte[] indexArray = new byte[IndexPrefixLength];
@@ -230,9 +225,14 @@ namespace GZipTest
                     }
                     // ensure that size of decompressed block is equal to BlockSizeOrigin (to ensure that file was compressed with this application)
                     if (block.Size != BlockSizeOrigin)
-                        _wrongSizeBlocks++; // only the last block of original file can be shorter than BlockSizeOrigin
-                    if (_wrongSizeBlocks > 1)
-                        throw new Exception("Unsupported format of decompressing file");
+                    {
+                        lock (_wrongSizeBlocksLock)
+                        {
+                            _wrongSizeBlocks++; // only the last block of original file can be shorter than BlockSizeOrigin
+                            if (_wrongSizeBlocks > 1)
+                                throw new Exception("Unsupported format of decompressing file");
+                        }
+                    }
                     _dataBlocksQueue.Enqueue(block);
                 }
             }
@@ -299,6 +299,9 @@ namespace GZipTest
             _processingThreads.Clear();
             _aliveThreadCount = 0;
             _dataBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
+            _filePositionLock = new object();
+            _aliveThreadCountLock = new object();
+            _wrongSizeBlocksLock = new object();
         }
 
         private void ReportProgress()
@@ -322,11 +325,14 @@ namespace GZipTest
                     }
                     catch (Exception ex)
                     {
-                        HandleThreadExit();
                         if (_threadExceptionHandler != null)
                             _threadExceptionHandler(ex);
                         else
                             throw;
+                    }
+                    finally
+                    {
+                        HandleThreadExit();
                     }
                 });
                 _processingThreads.Add(t);
@@ -363,12 +369,13 @@ namespace GZipTest
 
         private long _currentBlockIndex;
         private int _filePosition;
-        private static object _filePositionLock = new object();
+        private object _filePositionLock = new object();
 
         private int _aliveThreadCount;
-        private static object _aliveThreadCountLock = new object();
+        private object _aliveThreadCountLock = new object();
 
         private int _wrongSizeBlocks; // only one block during decompressing can be not equal to BlockSizeOrigin - the last one in origin file
+        private object _wrongSizeBlocksLock = new object();
 
         #endregion
 
@@ -387,7 +394,7 @@ namespace GZipTest
         private static readonly int IndexPrefixLength = 8;
         private static readonly int SizePrefixLength = 4;
         
-        private static readonly int MaxQueueLength = (int)(new Microsoft.VisualBasic.Devices.ComputerInfo().TotalPhysicalMemory / (ulong)BlockSizeOrigin / 2);
+        private static readonly int MaxQueueLength = (int)(new Microsoft.VisualBasic.Devices.ComputerInfo().TotalPhysicalMemory / (ulong)BlockSizeOrigin / 2); // how many blocks can be located in half of RAM
 
         #endregion
     }

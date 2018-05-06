@@ -10,16 +10,19 @@ namespace GZipTest
     {
         public ThreadSafeQueue(int maxLength)
         {
-            _maxLength = maxLength;
-            _maxLengthSemaphore = new Semaphore(_maxLength, _maxLength);
+            maxLength = Math.Max(MinLength, maxLength);
+            _maxLengthSemaphore = new Semaphore(maxLength, maxLength);
             IsAddingCompleted = false;
         }
 
+        /// <summary>
+        /// Signal that no new items are going to be enqueued
+        /// </summary>
         public void CompleteAdding()
         {
             IsAddingCompleted = true;
         }
-
+        
         public void Enqueue(T block)
         {
             if (IsAddingCompleted)
@@ -52,8 +55,9 @@ namespace GZipTest
 
         private Queue<T> _queue = new Queue<T>();
 
-        private int _maxLength;
         private Semaphore _maxLengthSemaphore;
-        
+
+        private static readonly int MinLength = 2;
+
     }
 }

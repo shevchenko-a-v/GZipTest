@@ -56,8 +56,11 @@ namespace GZipTest
                         File.Delete(destinationFile);
                     Console.WriteLine("An error occurred during file processing.");
                 }
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
+                if (System.Diagnostics.Debugger.IsAttached) // with debugger don't close application immediately
+                {
+                    Console.WriteLine("Press any key to exit...");
+                    Console.ReadKey();
+                }
             }
         }
 
