@@ -8,10 +8,14 @@ using System.Threading;
 
 namespace GZipTest
 {
+    public delegate void ReportProgressDelegate(int current, int total);
+
     public class GZipTest
     {
-        public GZipTest()
+        public GZipTest(ReportProgressDelegate report = null)
         {
+            if (report != null)
+                _report = report;
             _dataBlocksQueue = new DataBlockQueue(MaxQueueLength);
             _processingThreads = new List<Thread>();
         }
@@ -77,6 +81,8 @@ namespace GZipTest
                     ulong index;
                     lock (_filePositionLock)
                     {
+                        if (_totalTasks == 0)
+                            _totalTasks = (int)Math.Ceiling((double)fs.Length / BlockSizeOrigin);
                         filePositionToRead = _filePosition;
                         if (filePositionToRead >= fs.Length)
                         {
@@ -126,6 +132,7 @@ namespace GZipTest
                         var bytesToWrite = CompressedBlockToByteArray(block);
 
                         fs.Write(bytesToWrite, 0, bytesToWrite.Length);
+                        ReportProgress();
                     }
                 }
 
@@ -150,6 +157,7 @@ namespace GZipTest
 
                         fs.Seek((long)(block.Index * (ulong)BlockSizeOrigin), SeekOrigin.Begin);
                         fs.Write(block.Data, 0, block.Size);
+                        ReportProgress();
                     }
                 }
 
@@ -191,6 +199,8 @@ namespace GZipTest
                     int blockSize;
                     lock (_filePositionLock)
                     {
+                        if (_totalTasks == 0)
+                            _totalTasks = GetBlocksCount(fs);
                         // read index of block, its size and set _filePosition to next block
                         filePositionToRead = _filePosition;
                         if (filePositionToRead >= fs.Length)
@@ -266,8 +276,34 @@ namespace GZipTest
             }
         }
 
+        private int GetBlocksCount(Stream stream)
+        {
+            if (stream == null || !stream.CanRead)
+            {
+                return 0;
+            }
+            int cnt = 0;
+            stream.Position = IndexPrefixLength;
+            byte[] size = new byte[SizePrefixLength];
+            var readBytes = stream.Read(size, 0, SizePrefixLength);
+            while (readBytes != 0)
+            {
+                if (BitConverter.IsLittleEndian)
+                    Array.Reverse(size);
+                var curBlockSize = BitConverter.ToInt32(size, 0);
+                cnt++;
+                if (stream.Position + curBlockSize + IndexPrefixLength >= stream.Length)
+                    return cnt;
+                stream.Position += curBlockSize + IndexPrefixLength;
+                readBytes = stream.Read(size, 0, SizePrefixLength);
+            }
+            return cnt;
+        }
+
         private void CleanUp()
         {
+            _totalTasks = 0;
+            _currentTask = 0;
             _wrongSizeBlocks = 0;
             _filePosition = 0;
             _currentBlockIndex = 0;
@@ -278,6 +314,13 @@ namespace GZipTest
             }
             _processingThreads.Clear();
             _aliveThreadCount = 0;
+        }
+
+        private void ReportProgress()
+        {
+            ++_currentTask;
+            if (_report != null)
+                _report(_currentTask, _totalTasks);
         }
 
         private void CreateProcessingThreads(Action actionToRun)
@@ -297,8 +340,13 @@ namespace GZipTest
         #region Private fields and properties
 
         private DataBlockQueue _dataBlocksQueue;
-
         private List<Thread> _processingThreads;
+
+        #region Progress report
+        ReportProgressDelegate _report;
+        private int _totalTasks;
+        private int _currentTask;
+        #endregion Progress report
 
         private int ThreadNumber { get; } = Math.Max(Environment.ProcessorCount - 1, MinThreadNumber); // try use as many threads as logical processors exsit minus one for main thread
 
