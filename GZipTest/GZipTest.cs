@@ -30,7 +30,7 @@ namespace GZipTest
         {
             try
             {
-                CreateProcessingThreads(() => ReadAndCompressBlock(source));
+                CreateProcessingThreads(() => ReadAndCompressBlocks(source));
                 WriteBlocks(destination, CompressionMode.Compress);
             }
             finally
@@ -49,7 +49,7 @@ namespace GZipTest
         {
             try
             {
-                CreateProcessingThreads(() => ReadAndDecompressBlock(source));
+                CreateProcessingThreads(() => ReadAndDecompressBlocks(source));
                 WriteBlocks(destination, CompressionMode.Decompress);
             }
             finally
@@ -58,13 +58,13 @@ namespace GZipTest
             }
         }
 
-        #region Private methods
+        #region Private methods for Compression
 
         /// <summary>
-        /// Read data block from <paramref name="sourceFile"/>, compress it and push to threadsafe queue
+        /// Read data by blocks from <paramref name="sourceFile"/>, compress it and push to threadsafe queue
         /// </summary>
         /// <param name="sourceFile">Path to source file</param>
-        private void ReadAndCompressBlock(string sourceFile)
+        private void ReadAndCompressBlocks(string sourceFile)
         {
             using (var fs = new FileStream(sourceFile, FileMode.Open, FileAccess.Read))
             {
@@ -107,41 +107,7 @@ namespace GZipTest
                 }
             }
         }
-        
-        /// <summary>
-        /// Writes data blocks to <paramref name="destinationFile"/>.
-        /// <para>Pop block from the queue</para>
-        /// <para>If mode <paramref name="mode"/> is Compress then it writes first block index, size and then block itself.</para>
-        /// <para>If mode <paramref name="mode"/> is Decompress then it writes block to the correct position, calculated from block index.</para>
-        /// </summary>
-        /// <param name="destinationFile">File to write data</param>
-        /// <param name="mode">Compress or Decompress</param>
-        private void WriteBlocks(string destinationFile, CompressionMode mode)
-        {
-            using (FileStream fs = new FileStream(destinationFile, FileMode.CreateNew, FileAccess.Write))
-            {
-                while (true)
-                {
-                    DataBlock block = null;
-                    try
-                    {
-                        block = _dataBlocksQueue.Dequeue();
-                    }
-                    catch(InvalidOperationException)
-                    {
-                        // queue is empty and no items will be added -> exit
-                        return;
-                    }
-                    var bytesToWrite = mode == CompressionMode.Compress ? CompressedBlockToByteArray(block) : block.Data;
 
-                    if (mode == CompressionMode.Decompress)
-                        fs.Seek((block.Index * BlockSizeOrigin), SeekOrigin.Begin);
-                    fs.Write(bytesToWrite, 0, bytesToWrite.Length);
-                    ReportProgress();
-                }
-            }
-        }
-        
         private byte[] CompressedBlockToByteArray(DataBlock block)
         {
             byte[] ret = new byte[IndexPrefixLength + SizePrefixLength + block.Data.Length];
@@ -161,12 +127,16 @@ namespace GZipTest
             Array.Copy(block.Data, 0, ret, destPosition, block.Data.Length);
             return ret;
         }
+
+        #endregion
+
+        #region Private methods for Decompression
         
         /// <summary>
-        /// Read data block from <paramref name="sourceFile"/>, decompress it and push to threadsafe queue
+        /// Read data by blocks from <paramref name="sourceFile"/>, decompress it and push to threadsafe queue
         /// </summary>
         /// <param name="sourceFile">Path to source file</param>
-        private void ReadAndDecompressBlock(string sourceFile)
+        private void ReadAndDecompressBlocks(string sourceFile)
         {
             using (var fs = new FileStream(sourceFile, FileMode.Open, FileAccess.Read))
             {
@@ -175,7 +145,7 @@ namespace GZipTest
                     int filePositionToRead;
                     long index;
                     int blockSize;
-                    //   --- enter crit section ---
+                    //   --- enter critical section ---
                     lock (_filePositionLock)
                     {
                         // calculate total tasks to report
@@ -203,9 +173,8 @@ namespace GZipTest
                         index = BitConverter.ToInt64(indexArray, 0);
                         blockSize = BitConverter.ToInt32(sizeArray, 0);
                         
-                        // set file position for next thread
                         _filePosition += IndexPrefixLength + SizePrefixLength + blockSize;
-                    //   --- leave crit section ---
+                        //   --- leave critical section ---
                     }
 
                     byte[] data = new byte[blockSize];       
@@ -238,15 +207,41 @@ namespace GZipTest
             }
         }
 
-        private byte[] CompressData(byte[] data, int length, CompressionMode mode)
+        #endregion
+
+        #region Private methods
+
+        /// <summary>
+        /// Writes data blocks to <paramref name="destinationFile"/>.
+        /// <para>Pop block from the queue</para>
+        /// <para>If mode <paramref name="mode"/> is Compress then it writes first block index, size and then block itself.</para>
+        /// <para>If mode <paramref name="mode"/> is Decompress then it writes block to the correct position, calculated from block index.</para>
+        /// </summary>
+        /// <param name="destinationFile">File to write data</param>
+        /// <param name="mode">Compress or Decompress</param>
+        private void WriteBlocks(string destinationFile, CompressionMode mode)
         {
-            using (var compressed = new MemoryStream())
+            using (FileStream fs = new FileStream(destinationFile, FileMode.CreateNew, FileAccess.Write))
             {
-                using (var compressor = new GZipStream(compressed, mode))
+                while (true)
                 {
-                    compressor.Write(data, 0, length);
+                    DataBlock block = null;
+                    try
+                    {
+                        block = _dataBlocksQueue.Dequeue();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // queue is empty and no items will be added -> exit
+                        return;
+                    }
+                    var bytesToWrite = mode == CompressionMode.Compress ? CompressedBlockToByteArray(block) : block.Data;
+
+                    if (mode == CompressionMode.Decompress)
+                        fs.Seek((block.Index * BlockSizeOrigin), SeekOrigin.Begin);
+                    fs.Write(bytesToWrite, 0, bytesToWrite.Length);
+                    ReportProgress();
                 }
-                return compressed.ToArray();
             }
         }
 
