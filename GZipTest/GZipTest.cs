@@ -225,16 +225,10 @@ namespace GZipTest
             {
                 while (true)
                 {
-                    DataBlock block = null;
-                    try
-                    {
-                        block = _dataBlocksQueue.Dequeue();
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // queue is empty and no items will be added -> exit
+                    if (!_dataBlocksQueue.IsAlive)
                         return;
-                    }
+
+                    var block = _dataBlocksQueue.Dequeue();
                     var bytesToWrite = mode == CompressionMode.Compress ? CompressedBlockToByteArray(block) : block.Data;
 
                     if (mode == CompressionMode.Decompress)

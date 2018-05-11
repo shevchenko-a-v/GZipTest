@@ -12,6 +12,7 @@ namespace GZipTest
         {
             maxLength = Math.Max(MinLength, maxLength);
             _maxLengthSemaphore = new Semaphore(maxLength, maxLength);
+            _emptySemaphore = new Semaphore(0, maxLength);
             IsAddingCompleted = false;
         }
 
@@ -31,23 +32,31 @@ namespace GZipTest
             lock(_queue)
             {
                 _queue.Enqueue(block);
-                Monitor.Pulse(_queue);
+                _emptySemaphore.Release();
             }
         }
 
         public T Dequeue()
         {
-            lock(_queue)
+            if (!IsAlive)
+                throw new InvalidOperationException("Attempt to extract item when there are no items anymore and new items are not expected.");
+            _emptySemaphore.WaitOne();
+            lock (_queue)
             {
-                while (_queue.Count == 0)
-                {
-                    if (IsAddingCompleted)
-                        throw new InvalidOperationException("Attempt to extract item when there are no items anymore and new items are not expected.");
-                    Monitor.Wait(_queue, 250); // AddingCompleted can change value during this wait, so set the timeout interval to check it sometimes
-                }
                 var retVal = _queue.Dequeue();
                 _maxLengthSemaphore.Release();
                 return retVal;
+            }
+        }
+
+        public bool IsAlive
+        {
+            get
+            {
+                lock (_queue)
+                {
+                    return !IsAddingCompleted || _queue.Count > 0;
+                }
             }
         }
 
@@ -56,6 +65,7 @@ namespace GZipTest
         private Queue<T> _queue = new Queue<T>();
 
         private Semaphore _maxLengthSemaphore;
+        private Semaphore _emptySemaphore;
 
         private static readonly int MinLength = 2;
 
