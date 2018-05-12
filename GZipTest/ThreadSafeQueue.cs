@@ -1,7 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Threading;
 
 namespace GZipTest
@@ -32,8 +30,8 @@ namespace GZipTest
             lock(_queue)
             {
                 _queue.Enqueue(block);
-                _emptySemaphore.Release();
             }
+            _emptySemaphore.Release();
         }
 
         public T Dequeue()
@@ -41,12 +39,13 @@ namespace GZipTest
             if (!IsAlive)
                 throw new InvalidOperationException("Attempt to extract item when there are no items anymore and new items are not expected.");
             _emptySemaphore.WaitOne();
+            T retVal;
             lock (_queue)
             {
-                var retVal = _queue.Dequeue();
-                _maxLengthSemaphore.Release();
-                return retVal;
+                retVal = _queue.Dequeue();
             }
+            _maxLengthSemaphore.Release();
+            return retVal;
         }
 
         public bool IsAlive

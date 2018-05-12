@@ -1,8 +1,5 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text;
 
 namespace GZipTest
 {
@@ -27,7 +24,7 @@ namespace GZipTest
                     ShowErrorMessage("Destination file already exists.");
                     return;
                 }
-
+                
                 GZipTest gZip = new GZipTest(ShowErrorMessage, ReportProgress);
 
                 if (mode.Equals(CompressMode, StringComparison.OrdinalIgnoreCase))
@@ -41,7 +38,7 @@ namespace GZipTest
                     gZip.Decompress(sourceFile, destinationFile);
                 }
                 else
-                    ShowErrorMessage($@"Invalid mode: [{mode}]. Only [{CompressMode}] and [{DecompressMode}] values are acceptable.");
+                    ShowErrorMessage($@"Invalid mode: [{mode}]. Only [{CompressMode}] and [{DecompressMode}] values are acceptable.");                
             }
             catch (Exception ex)
             {

@@ -2,8 +2,6 @@
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
-using System.Linq;
-using System.Text;
 using System.Threading;
 
 namespace GZipTest
@@ -14,10 +12,10 @@ namespace GZipTest
     {
         public GZipTest(Action<Exception> threadExceptionHandler, ReportProgressDelegate report = null)
         {
-            if (report != null)
-                _report = report;
+            _report = report;
             _threadExceptionHandler = threadExceptionHandler;
-            _dataBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
+            _processedBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
+            _prepearedBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
             _processingThreads = new List<Thread>();
         }
 
@@ -30,7 +28,7 @@ namespace GZipTest
         {
             try
             {
-                CreateProcessingThreads(() => ReadAndCompressBlocks(source));
+                CreateProcessingThreads(() => ReadBlocksToCompress(source), CompressBlocks);
                 WriteBlocks(destination, CompressionMode.Compress);
             }
             finally
@@ -49,7 +47,7 @@ namespace GZipTest
         {
             try
             {
-                CreateProcessingThreads(() => ReadAndDecompressBlocks(source));
+                CreateProcessingThreads(() => ReadBlocksToDecompress(source), DecompressBlocks);
                 WriteBlocks(destination, CompressionMode.Decompress);
             }
             finally
@@ -61,53 +59,66 @@ namespace GZipTest
         #region Private methods for Compression
 
         /// <summary>
-        /// Read data by blocks from <paramref name="sourceFile"/>, compress it and push to threadsafe queue
+        /// Read data by blocks from <paramref name="sourceFile"/> and push to _prepearedBlocksQueue
         /// </summary>
         /// <param name="sourceFile">Path to source file</param>
-        private void ReadAndCompressBlocks(string sourceFile)
+        private void ReadBlocksToCompress(string sourceFile)
         {
             using (var fs = new FileStream(sourceFile, FileMode.Open, FileAccess.Read))
             {
-                while (true)
+                // calculate total tasks to report
+                if (_totalTasks == 0)
+                    _totalTasks = (int)Math.Ceiling((double)fs.Length / BlockSizeOrigin);
+
+                int index = 0;
+                byte[] data = new byte[BlockSizeOrigin];
+                int readBytes = fs.Read(data, 0, BlockSizeOrigin);
+                while (readBytes > 0)
                 {
-                    int filePositionToRead;
-                    long index;
-                    // --- enter critical section ---
-                    lock (_filePositionLock)
-                    {
-                        // calculate total tasks to report
-                        if (_totalTasks == 0)
-                            _totalTasks = (int)Math.Ceiling((double)fs.Length / BlockSizeOrigin);
-                        // get position to read
-                        filePositionToRead = _filePosition;
-                        if (filePositionToRead >= fs.Length)
-                            return; // exit when we reached end of file
+                    var block = new DataBlock(index++);
+                    block.Data = new byte[readBytes];
+                    Array.Copy(data, block.Data, readBytes);
+                    _prepearedBlocksQueue.Enqueue(block);
+                    readBytes = fs.Read(data, 0, BlockSizeOrigin);
+                }
+                _prepearedBlocksQueue.CompleteAdding();
+            }
+        }
 
-                        // set position for next thread 
-                        _filePosition += BlockSizeOrigin;
-                        index = _currentBlockIndex++;
-                    // --- leave critical section ---
-                    }
-                    // read block from current position
-                    byte[] data = new byte[BlockSizeOrigin];
-                    fs.Seek(filePositionToRead, SeekOrigin.Begin);
-                    var realLength = fs.Read(data, 0, BlockSizeOrigin);
-
-                    var block = new DataBlock(index);
+        /// <summary>
+        /// Take block from _prepearedBlocksQueue, compress it and push to _processedBlocksQueue
+        /// </summary>
+        private void CompressBlocks()
+        {
+            try
+            {
+                while (_prepearedBlocksQueue.IsAlive)
+                {
+                    var block = _prepearedBlocksQueue.Dequeue();
                     // compress and push to queue
                     using (var compressed = new MemoryStream())
                     {
                         using (var compressor = new GZipStream(compressed, CompressionMode.Compress, true))
                         {
-                            compressor.Write(data, 0, realLength);
+                            compressor.Write(block.Data, 0, block.Size);
                         }
                         block.Data = compressed.ToArray();
                     }
-                    _dataBlocksQueue.Enqueue(block);
+                    _processedBlocksQueue.Enqueue(block);
+                }
+            }
+            finally
+            {
+                lock (_aliveThreadCountLock)
+                {
+                    if (--_aliveProcessingThreadCount <= 0) // last thread informs queue that we will not add new elements
+                    {
+                        _processedBlocksQueue.CompleteAdding();
+                    }
                 }
             }
         }
-
+        
         private byte[] CompressedBlockToByteArray(DataBlock block)
         {
             byte[] ret = new byte[IndexPrefixLength + SizePrefixLength + block.Data.Length];
@@ -131,61 +142,69 @@ namespace GZipTest
         #endregion
 
         #region Private methods for Decompression
-        
+
         /// <summary>
-        /// Read data by blocks from <paramref name="sourceFile"/>, decompress it and push to threadsafe queue
+        /// Read data by blocks from <paramref name="sourceFile"/>
         /// </summary>
         /// <param name="sourceFile">Path to source file</param>
-        private void ReadAndDecompressBlocks(string sourceFile)
+        private void ReadBlocksToDecompress(string sourceFile)
         {
             using (var fs = new FileStream(sourceFile, FileMode.Open, FileAccess.Read))
             {
-                while (true)
+                // calculate total tasks to report
+                if (_totalTasks == 0)
                 {
-                    int filePositionToRead;
-                    long index;
-                    int blockSize;
-                    //   --- enter critical section ---
-                    lock (_filePositionLock)
-                    {
-                        // calculate total tasks to report
-                        if (_totalTasks == 0)
-                            _totalTasks = GetBlocksCount(fs);
+                    _totalTasks = GetBlocksCount(fs);
+                    fs.Seek(0, SeekOrigin.Begin); // GetBlockCount changed position -> reset it
+                }
 
-                        filePositionToRead = _filePosition;
-                        if (filePositionToRead >= fs.Length)
-                            return; // exit when we reached end of file}
+                // read index of block, its size and set _filePosition to next block
+                byte[] indexArray = new byte[IndexPrefixLength];
+                byte[] sizeArray = new byte[SizePrefixLength];
 
-                        // read index of block, its size and set _filePosition to next block
-                        byte[] indexArray = new byte[IndexPrefixLength];
-                        byte[] sizeArray = new byte[SizePrefixLength];
-                        fs.Seek(filePositionToRead, SeekOrigin.Begin);
-                        var realIndexLength = fs.Read(indexArray, 0, IndexPrefixLength);
-                        var realSizeLength = fs.Read(sizeArray, 0, SizePrefixLength);
-                        // if we cannot read required bytes something went wrong
-                        if (realIndexLength != IndexPrefixLength || realSizeLength != SizePrefixLength) 
-                            throw new Exception("Unsupported format of decompressing file");
-                        if (BitConverter.IsLittleEndian)
-                        {
-                            Array.Reverse(indexArray);
-                            Array.Reverse(sizeArray);
-                        }
-                        index = BitConverter.ToInt64(indexArray, 0);
-                        blockSize = BitConverter.ToInt32(sizeArray, 0);
-                        
-                        _filePosition += IndexPrefixLength + SizePrefixLength + blockSize;
-                        //   --- leave critical section ---
-                    }
-
-                    byte[] data = new byte[blockSize];       
-                    // read data
-                    if (fs.Read(data, 0, blockSize) != blockSize) // if we cannot read required bytes something went wrong
+                var realIndexLength = fs.Read(indexArray, 0, IndexPrefixLength);
+                var realSizeLength = fs.Read(sizeArray, 0, SizePrefixLength);
+                while (realIndexLength > 0 && realSizeLength > 0)
+                {
+                    // if we cannot read required bytes something went wrong
+                    if (realIndexLength != IndexPrefixLength || realSizeLength != SizePrefixLength)
                         throw new Exception("Unsupported format of decompressing file");
-                    var block = new DataBlock(index);
-                    byte[] decompressedData = new byte[blockSize];
+                    if (BitConverter.IsLittleEndian)
+                    {
+                        Array.Reverse(indexArray);
+                        Array.Reverse(sizeArray);
+                    }
+                    var index = BitConverter.ToInt64(indexArray, 0);
+                    var blockSize = BitConverter.ToInt32(sizeArray, 0);
 
+                    var block = new DataBlock(index);
+                    block.Data = new byte[blockSize];
+                    // read data
+                    var readBytes = fs.Read(block.Data, 0, blockSize);
+                    if (readBytes != blockSize) // if we cannot read required bytes something went wrong
+                        throw new Exception("Unsupported format of decompressing file");
+                    // push to queue
+                    _prepearedBlocksQueue.Enqueue(block);
+
+                    realIndexLength = fs.Read(indexArray, 0, IndexPrefixLength);
+                    realSizeLength = fs.Read(sizeArray, 0, SizePrefixLength);
+                }
+                _prepearedBlocksQueue.CompleteAdding();                
+            }
+        }
+
+        /// <summary>
+        /// Take block from _prepearedBlocksQueue, decompress it and push to _processedBlocksQueue
+        /// </summary>
+        private void DecompressBlocks()
+        {
+            try
+            {
+                while (_prepearedBlocksQueue.IsAlive)
+                {
+                    var block = _prepearedBlocksQueue.Dequeue();
                     // decompress
-                    using (var src = new MemoryStream(data))
+                    using (var src = new MemoryStream(block.Data))
                     using (var decompressor = new GZipStream(src, CompressionMode.Decompress))
                     using (MemoryStream decompressed = new MemoryStream())
                     {
@@ -202,11 +221,21 @@ namespace GZipTest
                                 throw new Exception("Unsupported format of decompressing file");
                         }
                     }
-                    _dataBlocksQueue.Enqueue(block);
+                    _processedBlocksQueue.Enqueue(block);
+                }
+            }
+            finally
+            {
+                lock (_aliveThreadCountLock)
+                {
+                    if (--_aliveProcessingThreadCount <= 0) // last thread informs queue that we will not add new elements
+                    {
+                        _processedBlocksQueue.CompleteAdding();
+                    }
                 }
             }
         }
-
+        
         #endregion
 
         #region Private methods
@@ -225,10 +254,10 @@ namespace GZipTest
             {
                 while (true)
                 {
-                    if (!_dataBlocksQueue.IsAlive)
+                    if (!_processedBlocksQueue.IsAlive)
                         return;
 
-                    var block = _dataBlocksQueue.Dequeue();
+                    var block = _processedBlocksQueue.Dequeue();
                     var bytesToWrite = mode == CompressionMode.Compress ? CompressedBlockToByteArray(block) : block.Data;
 
                     if (mode == CompressionMode.Decompress)
@@ -278,17 +307,19 @@ namespace GZipTest
             _totalTasks = 0;
             _currentTask = 0;
             _wrongSizeBlocks = 0;
-            _filePosition = 0;
-            _currentBlockIndex = 0;
+
+            if (_readThread.IsAlive)
+                _readThread.Abort();
             foreach (var t in _processingThreads)
             {
                 if (t.IsAlive)
                     t.Abort();
             }
             _processingThreads.Clear();
-            _aliveThreadCount = 0;
-            _dataBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
-            _filePositionLock = new object();
+
+            _aliveProcessingThreadCount = 0;
+            _processedBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
+            _prepearedBlocksQueue = new ThreadSafeQueue<DataBlock>(MaxQueueLength);
             _aliveThreadCountLock = new object();
             _wrongSizeBlocksLock = new object();
         }
@@ -300,52 +331,45 @@ namespace GZipTest
                 _report(_currentTask, _totalTasks);
         }
 
-        private void CreateProcessingThreads(Action actionToRun)
+        private void CreateProcessingThreads(Action actionRead, Action actionProcess)
         {
-            _aliveThreadCount = ThreadNumber;
+            // run thread for reading
+            _readThread = new Thread(() => ThreadWrapper(actionRead));
+            _readThread.Start();
+            // run required number of threads to process
+            _aliveProcessingThreadCount = CompressingThreadNumber;
             _processingThreads.Clear();
-            for (int i = 0; i < ThreadNumber; ++i)
+            for (int i = 0; i < CompressingThreadNumber; ++i)
             {
-                var t = new Thread(() =>
-                {
-                    try
-                    {
-                        actionToRun();
-                    }
-                    catch (Exception ex)
-                    {
-                        if (_threadExceptionHandler != null)
-                            _threadExceptionHandler(ex);
-                        else
-                            throw;
-                    }
-                    finally
-                    {
-                        HandleThreadExit();
-                    }
-                });
+                var t = new Thread(() => ThreadWrapper(actionProcess));
                 _processingThreads.Add(t);
                 t.Start();
             }
         }
 
-        private void HandleThreadExit()
+        private void ThreadWrapper(Action action)
         {
-            lock (_aliveThreadCountLock)
+            try
             {
-                if (--_aliveThreadCount <= 0) // last thread informs queue that we will not add new elements
-                {
-                    _dataBlocksQueue.CompleteAdding();
-                }
+                action();
+            }
+            catch (Exception ex)
+            {
+                if (_threadExceptionHandler != null)
+                    _threadExceptionHandler(ex);
+                else
+                    throw;
             }
         }
-
+        
         #endregion
 
         #region Private fields and properties
 
-        private ThreadSafeQueue<DataBlock> _dataBlocksQueue;
+        private ThreadSafeQueue<DataBlock> _processedBlocksQueue;
+        private ThreadSafeQueue<DataBlock> _prepearedBlocksQueue;
         private List<Thread> _processingThreads;
+        private Thread _readThread;
 
         #region Progress report
         ReportProgressDelegate _report;
@@ -354,13 +378,9 @@ namespace GZipTest
         Action<Exception> _threadExceptionHandler;
         #endregion Progress report
 
-        private int ThreadNumber { get; } = Math.Max(Environment.ProcessorCount - 1, MinThreadNumber); // try use as many threads as logical processors exsit minus one for main thread
-
-        private long _currentBlockIndex;
-        private int _filePosition;
-        private object _filePositionLock = new object();
-
-        private int _aliveThreadCount;
+        private int CompressingThreadNumber { get; } = Math.Max(Environment.ProcessorCount, MinCompressingThreadNumber); // try use as many threads as logical processors exsit
+        
+        private int _aliveProcessingThreadCount;
         private object _aliveThreadCountLock = new object();
 
         private int _wrongSizeBlocks; // only one block during decompressing can be not equal to BlockSizeOrigin - the last one in origin file
@@ -378,12 +398,12 @@ namespace GZipTest
         /// <summary>
         /// Min number of threads which will be used for file processing
         /// </summary>
-        private static readonly int MinThreadNumber = 2;
+        private static readonly int MinCompressingThreadNumber = 2;
 
         private static readonly int IndexPrefixLength = 8;
         private static readonly int SizePrefixLength = 4;
         
-        private static readonly int MaxQueueLength = (int)(new Microsoft.VisualBasic.Devices.ComputerInfo().TotalPhysicalMemory / (ulong)BlockSizeOrigin / 2); // how many blocks can be located in half of RAM
+        private static readonly int MaxQueueLength = (int)(new Microsoft.VisualBasic.Devices.ComputerInfo().TotalPhysicalMemory / (ulong)BlockSizeOrigin / 4); // how many blocks can be located in quater of RAM, since we have two queues
 
         #endregion
     }
